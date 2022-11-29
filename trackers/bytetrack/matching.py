@@ -1,11 +1,12 @@
+import cv2
 import numpy as np
 import scipy
 import lap
 from scipy.spatial.distance import cdist
 
 from cython_bbox import bbox_overlaps as bbox_ious
-from tracker import kalman_filter
-
+from trackers.bytetrack import kalman_filter
+import time
 
 def merge_matches(m1, m2, shape):
     O,P,Q = shape
@@ -69,20 +70,6 @@ def ious(atlbrs, btlbrs):
     return ious
 
 
-def tlbr_expand(tlbr, scale=1.2):
-    w = tlbr[2] - tlbr[0]
-    h = tlbr[3] - tlbr[1]
-
-    half_scale = 0.5 * scale
-
-    tlbr[0] -= half_scale * w
-    tlbr[1] -= half_scale * h
-    tlbr[2] += half_scale * w
-    tlbr[3] += half_scale * h
-
-    return tlbr
-
-
 def iou_distance(atracks, btracks):
     """
     Compute cost based on IoU
@@ -102,7 +89,6 @@ def iou_distance(atracks, btracks):
     cost_matrix = 1 - _ious
 
     return cost_matrix
-
 
 def v_iou_distance(atracks, btracks):
     """
@@ -124,7 +110,6 @@ def v_iou_distance(atracks, btracks):
 
     return cost_matrix
 
-
 def embedding_distance(tracks, detections, metric='cosine'):
     """
     :param tracks: list[STrack]
@@ -137,9 +122,10 @@ def embedding_distance(tracks, detections, metric='cosine'):
     if cost_matrix.size == 0:
         return cost_matrix
     det_features = np.asarray([track.curr_feat for track in detections], dtype=np.float)
+    #for i, track in enumerate(tracks):
+        #cost_matrix[i, :] = np.maximum(0.0, cdist(track.smooth_feat.reshape(1,-1), det_features, metric))
     track_features = np.asarray([track.smooth_feat for track in tracks], dtype=np.float)
-
-    cost_matrix = np.maximum(0.0, cdist(track_features, det_features, metric))  # / 2.0  # Nomalized features
+    cost_matrix = np.maximum(0.0, cdist(track_features, det_features, metric))  # Nomalized features
     return cost_matrix
 
 
@@ -148,8 +134,7 @@ def gate_cost_matrix(kf, cost_matrix, tracks, detections, only_position=False):
         return cost_matrix
     gating_dim = 2 if only_position else 4
     gating_threshold = kalman_filter.chi2inv95[gating_dim]
-    # measurements = np.asarray([det.to_xyah() for det in detections])
-    measurements = np.asarray([det.to_xywh() for det in detections])
+    measurements = np.asarray([det.to_xyah() for det in detections])
     for row, track in enumerate(tracks):
         gating_distance = kf.gating_distance(
             track.mean, track.covariance, measurements, only_position)
@@ -162,8 +147,7 @@ def fuse_motion(kf, cost_matrix, tracks, detections, only_position=False, lambda
         return cost_matrix
     gating_dim = 2 if only_position else 4
     gating_threshold = kalman_filter.chi2inv95[gating_dim]
-    # measurements = np.asarray([det.to_xyah() for det in detections])
-    measurements = np.asarray([det.to_xywh() for det in detections])
+    measurements = np.asarray([det.to_xyah() for det in detections])
     for row, track in enumerate(tracks):
         gating_distance = kf.gating_distance(
             track.mean, track.covariance, measurements, only_position, metric='maha')
@@ -195,19 +179,3 @@ def fuse_score(cost_matrix, detections):
     fuse_sim = iou_sim * det_scores
     fuse_cost = 1 - fuse_sim
     return fuse_cost
-
-def gate(cost_matrix, emb_cost):
-    """
-    :param tracks: list[STrack]
-    :param detections: list[BaseTrack]
-    :param metric:
-    :return: cost_matrix np.ndarray
-    """
-
-    if cost_matrix.size == 0:
-        return cost_matrix
-    
-    index = emb_cost > 0.3
-    cost_matrix[index] = 1
- 
-    return cost_matrix

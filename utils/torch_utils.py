@@ -15,7 +15,6 @@ import torch
 import torch.backends.cudnn as cudnn
 import torch.nn as nn
 import torch.nn.functional as F
-import torchvision
 
 try:
     import thop  # for FLOPS computation
@@ -34,15 +33,6 @@ def torch_distributed_zero_first(local_rank: int):
     yield
     if local_rank == 0:
         torch.distributed.barrier()
-
-
-def init_torch_seeds(seed=0):
-    # Speed-reproducibility tradeoff https://pytorch.org/docs/stable/notes/randomness.html
-    torch.manual_seed(seed)
-    if seed == 0:  # slower, more reproducible
-        cudnn.benchmark, cudnn.deterministic = False, True
-    else:  # faster, less reproducible
-        cudnn.benchmark, cudnn.deterministic = True, False
 
 
 def date_modified(path=__file__):
@@ -153,31 +143,6 @@ def initialize_weights(model):
             m.inplace = True
 
 
-def find_modules(model, mclass=nn.Conv2d):
-    # Finds layer indices matching module class 'mclass'
-    return [i for i, m in enumerate(model.module_list) if isinstance(m, mclass)]
-
-
-def sparsity(model):
-    # Return global model sparsity
-    a, b = 0., 0.
-    for p in model.parameters():
-        a += p.numel()
-        b += (p == 0).sum()
-    return b / a
-
-
-def prune(model, amount=0.3):
-    # Prune model to requested global sparsity
-    import torch.nn.utils.prune as prune
-    print('Pruning model... ', end='')
-    for name, m in model.named_modules():
-        if isinstance(m, nn.Conv2d):
-            prune.l1_unstructured(m, name='weight', amount=amount)  # prune
-            prune.remove(m, 'weight')  # make permanent
-    print(' %.3g global sparsity' % sparsity(model))
-
-
 def fuse_conv_and_bn(conv, bn):
     # Fuse convolution and batchnorm layers https://tehnokv.com/posts/fusing-batchnorm-and-conv/
     fusedconv = nn.Conv2d(conv.in_channels,
@@ -223,25 +188,6 @@ def model_info(model, verbose=False, img_size=640):
         fs = ''
 
     logger.info(f"Model Summary: {len(list(model.modules()))} layers, {n_p} parameters, {n_g} gradients{fs}")
-
-
-def load_classifier(name='resnet101', n=2):
-    # Loads a pretrained model reshaped to n-class output
-    model = torchvision.models.__dict__[name](pretrained=True)
-
-    # ResNet model properties
-    # input_size = [3, 224, 224]
-    # input_space = 'RGB'
-    # input_range = [0, 1]
-    # mean = [0.485, 0.456, 0.406]
-    # std = [0.229, 0.224, 0.225]
-
-    # Reshape output to n classes
-    filters = model.fc.weight.shape[1]
-    model.fc.bias = nn.Parameter(torch.zeros(n), requires_grad=True)
-    model.fc.weight = nn.Parameter(torch.zeros(n, filters), requires_grad=True)
-    model.fc.out_features = n
-    return model
 
 
 def scale_img(img, ratio=1.0, same_shape=False, gs=32):  # img(16,3,256,416)
@@ -315,6 +261,7 @@ class BatchNormXd(torch.nn.modules.batchnorm._BatchNorm):
         #  we could return the one that was originally created)
         return
 
+
 def revert_sync_batchnorm(module):
     # this is very similar to the function that it is trying to revert:
     # https://github.com/pytorch/pytorch/blob/c8b3686a3e4ba63dc59e5dcfe5db3430df256833/torch/nn/modules/batchnorm.py#L679
@@ -322,9 +269,9 @@ def revert_sync_batchnorm(module):
     if isinstance(module, torch.nn.modules.batchnorm.SyncBatchNorm):
         new_cls = BatchNormXd
         module_output = BatchNormXd(module.num_features,
-                                               module.eps, module.momentum,
-                                               module.affine,
-                                               module.track_running_stats)
+                                    module.eps, module.momentum,
+                                    module.affine,
+                                    module.track_running_stats)
         if module.affine:
             with torch.no_grad():
                 module_output.weight = module.weight
@@ -342,10 +289,10 @@ def revert_sync_batchnorm(module):
 
 class TracedModel(nn.Module):
 
-    def __init__(self, model=None, device=None, img_size=(640,640)): 
+    def __init__(self, model=None, device=None, img_size=(640, 640)):
         super(TracedModel, self).__init__()
-        
-        print(" Convert model to Traced-model... ") 
+
+        print(" Convert model to Traced-model... ")
         self.stride = model.stride
         self.names = model.names
         self.model = model
@@ -356,17 +303,17 @@ class TracedModel(nn.Module):
 
         self.detect_layer = self.model.model[-1]
         self.model.traced = True
-        
+
         rand_example = torch.rand(1, 3, img_size, img_size)
-        
+
         traced_script_module = torch.jit.trace(self.model, rand_example, strict=False)
-        #traced_script_module = torch.jit.script(self.model)
+        # traced_script_module = torch.jit.script(self.model)
         traced_script_module.save("traced_model.pt")
         print(" traced_script_module saved! ")
         self.model = traced_script_module
         self.model.to(device)
         self.detect_layer.to(device)
-        print(" model is traced! \n") 
+        print(" model is traced! \n")
 
     def forward(self, x, augment=False, profile=False):
         out = self.model(x)
